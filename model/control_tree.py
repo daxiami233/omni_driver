@@ -2,6 +2,19 @@ import json
 import re
 import xml.etree.ElementTree as ET
 
+from ..errors import HierarchyError
+
+
+BOOLEAN_ATTRIBUTES = {
+    "clickable",
+    "longClickable",
+    "selected",
+    "checkable",
+    "checked",
+    "enabled",
+    "focused",
+}
+
 
 class ControlTree:
     def __init__(self, root=None):
@@ -9,8 +22,7 @@ class ControlTree:
         self.root = root
 
     def __str__(self):
-        # Serialize the tree to a readable string for debugging.
-        return str(self.root.to_dict()) if self.root else "{}"
+        return json.dumps(self.to_dict(), ensure_ascii=False)
 
     def __call__(self, **kwargs):
         # Delegate attribute-based lookup to the root element.
@@ -27,6 +39,15 @@ class ControlTree:
             return total
 
         return 0 if self.root is None else walk(self.root)
+
+    def to_dict(self):
+        return self.root.to_dict() if self.root is not None else None
+
+    @classmethod
+    def from_dict(cls, source):
+        if source is None:
+            return cls()
+        return cls(Element.from_dict(source))
 
 
 class Element:
@@ -68,57 +89,79 @@ class Element:
         return result
 
     def to_dict(self):
-        # Convert the element subtree into a JSON-friendly structure.
         return {
-            "attributes": self._json_attributes(),
+            "attributes": dict(self.attributes),
             "children": [child.to_dict() for child in self.children],
         }
 
+    @classmethod
+    def from_dict(cls, source):
+        if not isinstance(source, dict):
+            raise HierarchyError("element data must be a dictionary")
+        attributes = source.get("attributes", {})
+        children = source.get("children", [])
+        if not isinstance(attributes, dict) or not isinstance(children, list):
+            raise HierarchyError("element data has invalid attributes or children")
+        element = cls(attributes=_normalize_attributes(attributes))
+        for child in children:
+            element.append(cls.from_dict(child))
+        return element
+
     def _match(self, **kwargs):
-        # Check whether the current element satisfies all requested attributes.
         for key, value in kwargs.items():
+            if key in BOOLEAN_ATTRIBUTES:
+                value = _to_bool(value)
             if self.attributes.get(key) != value:
                 return False
         return True
-
-    def _json_attributes(self):
-        # Normalize complex fields before serialization.
-        attributes = dict(self.attributes)
-        bounds = attributes.get("bounds")
-        if bounds is not None:
-            attributes["bounds"] = "".join(str(part) for part in bounds)
-        center = attributes.get("center")
-        if center is not None:
-            attributes["center"] = str(center)
-        return attributes
 
 
 class ControlTreeParser:
     @classmethod
     def dump(cls, tree, file, indent=2):
-        # Write the unified tree structure to disk as JSON.
+        if not isinstance(tree, ControlTree):
+            raise TypeError("tree must be a ControlTree")
         with open(file, "w", encoding="utf-8") as write_file:
-            json.dump(tree.root.to_dict(), write_file, indent=indent, ensure_ascii=False)
+            json.dump(tree.to_dict(), write_file, indent=indent, ensure_ascii=False)
+
+    @classmethod
+    def load(cls, file):
+        try:
+            with open(file, encoding="utf-8") as read_file:
+                return ControlTree.from_dict(json.load(read_file))
+        except (OSError, json.JSONDecodeError, HierarchyError) as exc:
+            raise HierarchyError(f"failed to load control tree: {exc}") from exc
 
     @classmethod
     def parse_hdc_json(cls, source):
-        # Parse a Harmony JSON hierarchy into the unified tree model.
-        return ControlTree(cls._parse_hdc_node(source))
+        try:
+            return ControlTree(cls._parse_hdc_node(source))
+        except HierarchyError:
+            raise
+        except Exception as exc:
+            raise HierarchyError(f"invalid Harmony hierarchy: {exc}") from exc
 
     @classmethod
     def parse_adb_xml(cls, source):
-        # Parse an Android XML hierarchy into the unified tree model.
-        return ControlTree(cls._parse_adb_node(ET.fromstring(source)))
+        if not isinstance(source, (str, bytes)) or not source:
+            raise HierarchyError("Android hierarchy must be non-empty XML")
+        try:
+            return ControlTree(cls._parse_adb_node(ET.fromstring(source)))
+        except ET.ParseError as exc:
+            raise HierarchyError(f"invalid Android hierarchy XML: {exc}") from exc
 
     @classmethod
     def _parse_hdc_node(cls, source):
-        # Convert one Harmony node and its descendants into Element objects.
+        if not isinstance(source, dict):
+            raise HierarchyError("Harmony hierarchy node must be a dictionary")
         if "attributes" not in source:
-            raise KeyError("expected key: attributes")
+            raise HierarchyError("Harmony hierarchy node is missing attributes")
 
         extra = source["attributes"]
-        x1, y1, x2, y2 = cls._parse_bounds(extra["bounds"])
-        attributes = {
+        if not isinstance(extra, dict):
+            raise HierarchyError("Harmony hierarchy attributes must be a dictionary")
+        x1, y1, x2, y2 = cls._parse_bounds(extra.get("bounds", ""))
+        attributes = _normalize_attributes({
             "bundle": extra.get("bundleName", ""),
             "page": extra.get("pagePath", ""),
             "bounds": [[x1, y1], [x2, y2]],
@@ -133,9 +176,12 @@ class ControlTreeParser:
             "text": extra.get("text", ""),
             "enabled": extra.get("enabled", ""),
             "focused": extra.get("focused", ""),
-        }
+        })
         element = Element(attributes=attributes)
-        for child in source.get("children", []):
+        children = source.get("children", [])
+        if not isinstance(children, list):
+            raise HierarchyError("Harmony hierarchy children must be a list")
+        for child in children:
             element.append(cls._parse_hdc_node(child))
         return element
 
@@ -143,26 +189,26 @@ class ControlTreeParser:
     def _parse_adb_node(cls, source):
         # Convert one Android XML node and its descendants into Element objects.
         if source.tag == "hierarchy":
-            attributes = {
+            attributes = _normalize_attributes({
                 "bundle": "",
                 "page": "",
                 "bounds": [[0, 0], [0, 0]],
                 "center": [0, 0],
-                "clickable": "",
-                "longClickable": "",
-                "selected": "",
-                "checkable": "",
-                "checked": "",
+                "clickable": False,
+                "longClickable": False,
+                "selected": False,
+                "checkable": False,
+                "checked": False,
                 "type": "",
                 "id": "",
                 "text": "",
-                "enabled": "",
-                "focused": "",
-            }
+                "enabled": False,
+                "focused": False,
+            })
         else:
             extra = source.attrib
             x1, y1, x2, y2 = cls._parse_bounds(extra.get("bounds", ""), allow_fallback=True)
-            attributes = {
+            attributes = _normalize_attributes({
                 "bundle": extra.get("package", ""),
                 "page": "",
                 "bounds": [[x1, y1], [x2, y2]],
@@ -177,7 +223,7 @@ class ControlTreeParser:
                 "text": extra.get("text", ""),
                 "enabled": extra.get("enabled", ""),
                 "focused": extra.get("focused", ""),
-            }
+            })
 
         element = Element(attributes=attributes)
         for child in source:
@@ -186,8 +232,19 @@ class ControlTreeParser:
 
     @staticmethod
     def _parse_bounds(raw_bounds, allow_fallback=False):
-        # Parse bounds text into coordinates, with an optional fallback for invalid values.
-        match = re.match(r"\[(-?\d+),\s*(-?\d+)\]\[(-?\d+),\s*(-?\d+)\]", raw_bounds)
+        if (
+            isinstance(raw_bounds, (list, tuple))
+            and len(raw_bounds) == 2
+            and all(isinstance(point, (list, tuple)) and len(point) == 2 for point in raw_bounds)
+        ):
+            try:
+                return tuple(int(value) for point in raw_bounds for value in point)
+            except (TypeError, ValueError):
+                pass
+        match = re.fullmatch(
+            r"\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]\[\s*(-?\d+)\s*,\s*(-?\d+)\s*\]",
+            str(raw_bounds or "").strip(),
+        )
         if match:
             x1, y1, x2, y2 = map(int, match.groups())
             if (x1, y1, x2, y2) == (2147483647, 2147483647, -2147483648, -2147483648):
@@ -195,4 +252,34 @@ class ControlTreeParser:
             return x1, y1, x2, y2
         if allow_fallback:
             return 0, 0, 100, 100
-        raise ValueError(f"invalid bounds: {raw_bounds}")
+        raise HierarchyError(f"invalid bounds: {raw_bounds}")
+
+
+def _normalize_attributes(attributes):
+    normalized = dict(attributes)
+    for key in BOOLEAN_ATTRIBUTES:
+        normalized[key] = _to_bool(normalized.get(key))
+
+    bounds = normalized.get("bounds", [[0, 0], [0, 0]])
+    x1, y1, x2, y2 = ControlTreeParser._parse_bounds(bounds, allow_fallback=True)
+    normalized["bounds"] = [[x1, y1], [x2, y2]]
+
+    center = normalized.get("center")
+    if isinstance(center, (list, tuple)) and len(center) == 2:
+        try:
+            normalized["center"] = [int(center[0]), int(center[1])]
+        except (TypeError, ValueError):
+            normalized["center"] = [int((x1 + x2) / 2), int((y1 + y2) / 2)]
+    else:
+        normalized["center"] = [int((x1 + x2) / 2), int((y1 + y2) / 2)]
+    return normalized
+
+
+def _to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)

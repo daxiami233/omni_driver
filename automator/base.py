@@ -51,6 +51,9 @@ class Automator(ABC):
 
     def swipe_ext(self, direction, scale=0.4):
         direction = SwipeDirection(direction)
+        scale = float(scale)
+        if not 0 < scale <= 1:
+            raise ValueError("swipe scale must be in the range (0, 1]")
         if direction == SwipeDirection.LEFT:
             return self.swipe(0.5, 0.5, 0.5 - scale, 0.5)
         if direction == SwipeDirection.RIGHT:
@@ -68,7 +71,18 @@ class Automator(ABC):
         pass
 
     @abstractmethod
+    def current_activity(self):
+        pass
+
+    def current_package(self):
+        return ""
+
+    @abstractmethod
     def screenshot(self, path=""):
+        pass
+
+    @abstractmethod
+    def display_size(self):
         pass
 
     @abstractmethod

@@ -8,8 +8,7 @@ from hmdriver2.driver import Driver
 from hmdriver2.proto import KeyCode
 from loguru import logger
 
-from model.control_tree import ControlTreeParser
-
+from ..model.control_tree import ControlTreeParser
 from .base import Automator
 
 h2_logger = logging.getLogger("hmdriver2")
@@ -70,18 +69,51 @@ class H2(Automator):
     def dump_hierarchy(self):
         return ControlTreeParser.parse_hdc_json(self._driver.dump_hierarchy())
 
+    def current_activity(self):
+        _package_name, page_name = self._current_app()
+        return page_name
+
+    def current_package(self):
+        package_name, _page_name = self._current_app()
+        return package_name
+
+    def _current_app(self):
+        try:
+            current = self._driver.current_app()
+        except Exception as exc:
+            logger.warning("h2 failed to get current foreground app: {}", exc)
+            return "", ""
+        if isinstance(current, (tuple, list)) and len(current) >= 2:
+            return str(current[0] or "").strip(), str(current[1] or "").strip()
+        if isinstance(current, dict):
+            package_name = current.get("package_name") or current.get("bundle_name") or current.get("package")
+            page_name = current.get("page_name") or current.get("ability_name") or current.get("ability")
+            return str(package_name or "").strip(), str(page_name or "").strip()
+        logger.warning("h2 unrecognized current app response: {!r}", current)
+        return "", ""
+
     def screenshot(self, path=""):
         temp_path = f"_tmp_{uuid.uuid4().hex}.jpeg"
+        local_path = ""
         try:
-            local_path = self._driver.screenshot(temp_path)
+            local_path = str(self._driver.screenshot(temp_path) or temp_path)
             image = cv2.imread(local_path)
+            if image is None:
+                raise RuntimeError(f"h2 screenshot file cannot be decoded: {local_path}")
             if path:
                 logger.debug("h2 save screenshot: {}", path)
                 shutil.copyfile(local_path, path)
             return image
         finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            cleanup_paths = {temp_path}
+            if local_path and os.path.basename(local_path) == os.path.basename(temp_path):
+                cleanup_paths.add(local_path)
+            for cleanup_path in cleanup_paths:
+                if os.path.isfile(cleanup_path):
+                    os.remove(cleanup_path)
+
+    def display_size(self):
+        return self._driver.display_size
 
     def home(self):
         return self._driver.go_home()
